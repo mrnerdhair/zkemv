@@ -6,7 +6,13 @@ This basic implementation is based on "counter" contract, that increment / decre
 
 - [Install Rust](https://www.rust-lang.org/tools/install) (you'll need `rustup` and Cargo).
 - For our example, [install RISC Zero](https://dev.risczero.com/api/zkvm/install).
-- [Start a single-node devnet](https://docs.hyle.eu/developers/quickstart/devnet/). We recommend using [dev-mode](https://dev.risczero.com/api/generating-proofs/dev-mode) with `-e RISC0_DEV_MODE=1` for faster iterations during development.
+- Run a local devnet node:
+
+Clone the [hyle](https://github.com/Hyle-org/hyle) repo, checkout the version you need, and run:
+```sh 
+export RISC0_DEV_MODE=1
+cargo run -- --pg
+```
 
 ## Quickstart
 
