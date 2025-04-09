@@ -1,11 +1,11 @@
 use borsh::{io::Error, BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-impl sdk::HyleContract for Counter {
+impl sdk::ZkContract for Counter {
     /// Entry point of the contract's logic
-    fn execute(&mut self, contract_input: &sdk::ContractInput) -> sdk::RunResult {
+    fn execute(&mut self, contract_input: &sdk::Calldata) -> sdk::RunResult {
         // Parse contract inputs
-        let (action, ctx) = sdk::utils::parse_raw_contract_input::<CounterAction>(contract_input)?;
+        let (action, ctx) = sdk::utils::parse_raw_calldata::<CounterAction>(contract_input)?;
 
         // Execute the contract logic
         match action {
