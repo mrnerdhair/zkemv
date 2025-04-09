@@ -96,8 +96,7 @@ async fn main() -> Result<()> {
                 index: sdk::BlobIndex(0),
                 tx_blob_count: blobs.len(),
             };
-
-            let (program_outputs, _, _) = initial_state.execute(&inputs).unwrap();
+            let (program_outputs, _, _) = initial_state.clone().execute(&inputs).unwrap();
             println!("🚀 Executed: {}", program_outputs);
 
             // Generate the zk proof
