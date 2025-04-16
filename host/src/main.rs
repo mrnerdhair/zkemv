@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     let prover = Risc0Prover::new(GUEST_ELF);
 
     // This dummy example doesn't uses identities. But there are required fields & validation.
-    let identity = format!("none.{}", contract_name);
+    let identity = format!("none@{}", contract_name);
 
     match cli.command {
         Commands::RegisterContract {} => {
