@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use client_sdk::helpers::risc0::Risc0Prover;
+use client_sdk::rest_client::NodeApiClient;
 use contract::Counter;
 use contract::CounterAction;
 use sdk::api::APIRegisterContract;
@@ -53,22 +54,23 @@ async fn main() -> Result<()> {
 
             // Send the transaction to register the contract
             let res = client
-                .register_contract(&APIRegisterContract {
+                .register_contract(APIRegisterContract {
                     verifier: "risc0-1".into(),
                     program_id: sdk::ProgramId(sdk::to_u8_array(&GUEST_ID).to_vec()),
                     state_commitment: initial_state.commit(),
                     contract_name: contract_name.clone().into(),
+                    ..Default::default()
                 })
                 .await?;
             println!("✅ Register contract tx sent. Tx hash: {}", res);
         }
         Commands::Increment {} => {
             // Fetch the initial state from the node
-            let mut initial_state: Counter = client
-                .get_contract(&contract_name.clone().into())
+            let initial_state: Counter = client
+                .get_contract(contract_name.clone().into())
                 .await
                 .unwrap()
-                .state
+                .state_commitment
                 .into();
 
             // ----
@@ -79,7 +81,7 @@ async fn main() -> Result<()> {
             let blob_tx = BlobTransaction::new(identity.clone(), blobs.clone());
 
             // Send the blob transaction
-            let blob_tx_hash = client.send_tx_blob(&blob_tx).await.unwrap();
+            let blob_tx_hash = client.send_tx_blob(blob_tx).await.unwrap();
             println!("✅ Blob tx sent. Tx hash: {}", blob_tx_hash);
 
             // ----
@@ -97,7 +99,7 @@ async fn main() -> Result<()> {
                 tx_blob_count: blobs.len(),
             };
             let (program_outputs, _, _) = initial_state.clone().execute(&inputs).unwrap();
-            println!("🚀 Executed: {}", program_outputs);
+            println!("🚀 Executed: {}", String::from_utf8(program_outputs).unwrap());
 
             // Generate the zk proof
             let proof = prover
@@ -112,7 +114,7 @@ async fn main() -> Result<()> {
             };
 
             // Send the proof transaction
-            let proof_tx_hash = client.send_tx_proof(&proof_tx).await.unwrap();
+            let proof_tx_hash = client.send_tx_proof(proof_tx).await.unwrap();
             println!("✅ Proof tx sent. Tx hash: {}", proof_tx_hash);
         }
     }

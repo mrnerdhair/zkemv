@@ -1,4 +1,5 @@
 use borsh::{io::Error, BorshDeserialize, BorshSerialize};
+use sdk::FullStateRevert;
 use serde::{Deserialize, Serialize};
 
 impl sdk::ZkContract for Counter {
@@ -14,7 +15,7 @@ impl sdk::ZkContract for Counter {
 
         // program_output might be used to give feedback to the user
         let program_output = format!("new value: {}", self.value);
-        Ok((program_output, ctx, vec![]))
+        Ok((program_output.into(), ctx, vec![]))
     }
 
     /// Commit the state of the contract
@@ -34,6 +35,8 @@ pub enum CounterAction {
 pub struct Counter {
     pub value: u32,
 }
+
+impl FullStateRevert for Counter {}
 
 /// Utils function for the host
 impl Counter {

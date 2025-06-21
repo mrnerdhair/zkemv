@@ -21,6 +21,6 @@ fn main() {
     let env = Risc0Env {};
     let (commitment_metadata, calldata): (Vec<u8>, Calldata) = env.read();
 
-    let output = execute::<Counter>(&commitment_metadata, &calldata);
-    env.commit(&output);
+    let output = execute::<Counter>(&commitment_metadata, &[calldata]);
+    env.commit(output);
 }
