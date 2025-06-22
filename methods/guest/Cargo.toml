@@ -11,4 +11,4 @@ sdk = { git = "https://github.com/hyli-org/hyli", package = "hyle-contract-sdk",
 ], tag = "v0.13.2" }
 contract = { path = "../../contract", package = "contract" }
 
-risc0-zkvm = { version = "2.1.0", default-features = false, features = ['std'] }
+risc0-zkvm = { version = "2.1.0", default-features = false, features = ['std', 'unstable'] }
