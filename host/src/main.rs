@@ -5,13 +5,13 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use client_sdk::helpers::risc0::Risc0Prover;
 use client_sdk::rest_client::NodeApiClient;
-use contract::Counter;
-use contract::CounterAction;
+use contract::{ZkEmv, CardThings};
+use contract::ZkEmvAction;
 use pcsc::Protocols;
 use pcsc::MAX_BUFFER_SIZE;
 use rsa::traits::PublicKeyParts;
 use sdk::api::APIRegisterContract;
-use sdk::BlobTransaction;
+use sdk::{BlobData, BlobTransaction};
 use sdk::ProofTransaction;
 use sdk::{Calldata, ZkContract};
 use sha1::Digest;
@@ -33,15 +33,18 @@ struct Cli {
     #[arg(long, default_value = "http://localhost:4321")]
     pub host: String,
 
-    #[arg(long, default_value = "counter")]
+    #[arg(long, default_value = "zkemv")]
     pub contract_name: String,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     RegisterContract {},
-    Increment {},
-    EmvTerminal {
+    RegisterIdentity {
+        #[arg(long, default_value = "0")]
+        reader_index: usize,
+    },
+    VerifyIdentity {
         #[arg(long, default_value = "0")]
         reader_index: usize,
     },
@@ -58,13 +61,10 @@ async fn main() -> Result<()> {
     // Will be used to generate zkProof of the execution.
     let prover = Risc0Prover::new(GUEST_ELF);
 
-    // This dummy example doesn't uses identities. But there are required fields & validation.
-    let identity = format!("none@{}", contract_name);
-
     match cli.command {
         Commands::RegisterContract {} => {
             // Build initial state of contract
-            let initial_state = Counter { value: 0 };
+            let initial_state = ZkEmv::default();
 
             // Send the transaction to register the contract
             let res = client
@@ -78,9 +78,15 @@ async fn main() -> Result<()> {
                 .await?;
             println!("✅ Register contract tx sent. Tx hash: {}", res);
         }
-        Commands::Increment {} => {
+        Commands::RegisterIdentity { reader_index } => {
+            // Do card things
+            let card_things = do_card_things(reader_index, |_| Ok(0))?;
+            let icc_key_hash = card_things.icc_key_hash();
+
+            let identity = format!("{}@{}", hex::encode(icc_key_hash), contract_name);
+
             // Fetch the initial state from the node
-            let initial_state: Counter = client
+            let initial_state: ZkEmv = client
                 .get_contract(contract_name.clone().into())
                 .await
                 .unwrap()
@@ -90,7 +96,7 @@ async fn main() -> Result<()> {
             // ----
             // Build the blob transaction
             // ----
-            let action = CounterAction::Increment {};
+            let action = ZkEmvAction::RegisterIdentity;
             let blobs = vec![action.as_blob(contract_name)];
             let blob_tx = BlobTransaction::new(identity.clone(), blobs.clone());
 
@@ -131,250 +137,64 @@ async fn main() -> Result<()> {
             let proof_tx_hash = client.send_tx_proof(proof_tx).await.unwrap();
             println!("✅ Proof tx sent. Tx hash: {}", proof_tx_hash);
         }
-        Commands::EmvTerminal { reader_index } => {
-            println!("Establishing PC/SC context...");
-            let ctx = pcsc::Context::establish(pcsc::Scope::User)?;
-            println!("Listing readers...");
-            let readers = ctx.list_readers_owned()?;
-            for (i, reader_name) in readers.iter().enumerate() {
-                println!("\t{} - {:?}", i, reader_name);
-            }
-            if readers.len() == 0 {
-                bail!("No readers found");
-            }
-            println!("Connecting to reader {}...", reader_index);
-            let card = ctx.connect(&readers[reader_index], pcsc::ShareMode::Shared, Protocols::ANY)?;
+        Commands::VerifyIdentity { reader_index } => {
+            // Fetch the initial state from the node
+            let initial_state: ZkEmv = client
+                .get_contract(contract_name.clone().into())
+                .await
+                .unwrap()
+                .state_commitment
+                .into();
 
-            println!("Getting card status...");
-            let status = card.status2_owned()?;
-            println!("ATR: {}", hex::encode_upper(status.atr()));
+            // Do card things
+            let card_things = do_card_things(
+                reader_index, |x| initial_state.get_nonce(x).ok_or(anyhow!("nonce not found for key hash {} in {:?}", hex::encode(x), initial_state)))?;
+            
+            // ----
+            // Build the blob transaction
+            // ----
 
-            let out = Tlv::from_vec(&match do_apdu(&card, apdu::command::select_file(0x04, 0, "1PAY.SYS.DDF01".as_bytes()).into())? {
-                Err(APDUError { sw: 0x6a82, .. }) => do_apdu(&card, apdu::command::select_file(0x04, 0, "2PAY.SYS.DDF01".as_bytes()).into())?,
-                x => x,
-            }?)?;
+            let identity = format!("{}@{}", hex::encode(card_things.icc_key_hash()), contract_name);
+            let action = ZkEmvAction::VerifyIdentity;
+            let blobs = vec![sdk::Blob {
+                contract_name: contract_name.clone().into(),
+                data: BlobData(borsh::to_vec(&action).expect("failed to encode BlobData")),
+            }];
+            let blob_tx = BlobTransaction::new(identity, blobs.clone());
 
-            let aid = find_val_raw(&out, "6F / A5 / BF0C / 61 / 4F")?.ok_or(anyhow!("AID not found"))?;
-            // let aid = "simpleapplet".as_bytes().to_vec();
-            // let aid = hex::decode("A0000000041010")?;
-            println!("Selecting AID {}...", hex::encode_upper(&aid));
+            // Send the blob transaction
+            let blob_tx_hash = client.send_tx_blob(blob_tx.clone()).await.unwrap();
+            println!("✅ Blob tx sent. Tx hash: {}", blob_tx_hash);
 
-            let ats = Tlv::from_vec(&do_apdu(&card, apdu::command::select_file(0x04, 0, &aid).into())??)?;
-            println!("ATS: {}", hex::encode_upper(&ats.to_vec()));
+            // ----
+            // Prove the state transition
+            // ----
 
-            let label = find_val_raw(&ats, "6F / A5 / 50")?;
-            let lang = find_val_raw(&ats, "6F / A5 / 5F2D")?;
-            let country = find_val_raw(&ats, "6F / A5 / BF0C / 5F55")?;
+            // Build the calldata
 
-            println!("Label: {}", label.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
-            println!("Language: {}", lang.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
-            println!("Country: {}", country.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
+            let calldata = Calldata {
+                identity: blob_tx.identity.clone(),
+                tx_hash: blob_tx_hash.clone(),
+                private_input: card_things.as_bytes()?,
+                tx_ctx: None,
+                blobs: blobs.clone().into(),
+                tx_blob_count: blobs.len(),
+                index: sdk::BlobIndex(0),
+            };
+            let (program_output, _, _) = initial_state.clone().execute(&calldata).unwrap();
+            println!("🚀 Executed: {}", String::from_utf8(program_output.clone()).unwrap());
 
-            let processing_options = Tlv::from_vec(&do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xa8, 0, 0, &Tlv::new(0x83, Value::Val(vec![]))?.to_vec()))??)?;
-            println!("GET PROCESSING OPTIONS: {}", hex::encode_upper(&processing_options.to_vec()));
+            // Generate the zk proof
+            let proof = prover.prove(program_output, &[calldata]).await.unwrap();
 
-            // let atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x36))??;
-            // println!("ATC: {}", hex::encode(atc));
-            // let last_online_atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x13))??;
-            // println!("Last online ATC: {}", hex::encode(last_online_atc));
+            let proof_tx = ProofTransaction {
+                proof,
+                contract_name: contract_name.clone().into(),
+            };
 
-            let afl = find_val_raw(&processing_options, "77 / 94")?.ok_or(anyhow!("AFL not found"))?;
-            let mut afl_items = afl.chunks_exact(4);
-            let mut data_items = vec![ processing_options ];
-            let mut dda_byte_buf = vec![];
-            while let Some(afl_item) = afl_items.next() {
-                let [sfi, srec, erec, dar] = TryInto::<[u8; 4]>::try_into(afl_item).unwrap();
-                ensure!(sfi & 0b111 == 0);
-                let sfi = sfi >> 3;
-                for i in srec..=erec {
-                    println!("Reading file {}, record {}", sfi, i);
-                    let tlv_buf = do_apdu(&card, apdu::Command::new(0, 0xb2, i, (sfi << 3) | 0b100))??;
-                    let tlv = Tlv::from_vec(&tlv_buf)?;
-                    ensure!(tlv.tag() == 0x70);
-                    println!("{}", tlv.val());
-                    let val = tlv.val().to_vec();
-
-                    if i - srec < dar {
-                        if sfi > 10 {
-                            dda_byte_buf.append(&mut tlv.to_vec());
-                        } else {
-                            dda_byte_buf.append(&mut val.clone());
-                        }
-                    }
-
-                    data_items.push(tlv);
-                }
-            }
-            ensure!(afl_items.remainder().len() == 0);
-
-            let rid = u64::from_be_bytes([0,0,0,aid[0],aid[1],aid[2],aid[3],aid[4]]);
-            let ca_idx = find_data_item(&data_items, "8F")?.ok_or(anyhow!("ca_idx missing"))?;
-            ensure!(ca_idx.len() == 1);
-            let ca_idx = ca_idx[0];
-            println!("ca_idx: {}/{}", hex::encode(&rid.to_be_bytes()), hex::encode(&[ca_idx]));
-
-            let ca_key = get_ca_key(rid, ca_idx).ok_or(anyhow!("unknown CA key"))?;
-
-            let issuer_cert_raw = find_data_item(&data_items, "90")?.ok_or(anyhow!("issuer cert missing"))?;
-            ensure!(ca_key.n().bits() == issuer_cert_raw.len() * 8);
-
-            let issuer_cert: rsa::BigUint = rsa::hazmat::rsa_encrypt(&ca_key, &rsa::BigUint::from_bytes_be(&issuer_cert_raw))?;
-            let issuer_cert = issuer_cert.to_bytes_be();
-            println!("issuer cert: {}", hex::encode(&issuer_cert));
-
-            ensure!(ca_key.n().bits() == issuer_cert.len() * 8);
-            ensure!(*issuer_cert.last().unwrap() == 0xbc);
-            ensure!(issuer_cert[0] == 0x6a);
-            ensure!(issuer_cert[1] == 0x02);
-
-            let issuer_pk_remainder = find_data_item(&data_items, "92")?.unwrap_or(vec![]);
-            let issuer_pk_exponent = find_data_item(&data_items, "9f32")?.ok_or(anyhow!("missing issuer public key exponent"))?;
-
-            let issuer_cert_hash_contents = &[
-                &issuer_cert[1..][0..(14 + (issuer_cert.len() - 36))],
-                &issuer_pk_remainder,
-                &issuer_pk_exponent,
-            ].concat();
-            println!("issuer_cert_hash_contents: {}", hex::encode(&issuer_cert_hash_contents));
-
-            let issuer_cert_hash = sha1::Sha1::digest(&issuer_cert_hash_contents).to_vec();
-            println!("issuer cert hash: {}", hex::encode(&issuer_cert_hash));
-    
-            let issuer_cert_hash_expected = &issuer_cert[(15+(issuer_cert.len() - 36))..][0..20];
-            println!("expected: {}", hex::encode(issuer_cert_hash_expected));
-
-            ensure!(&issuer_cert_hash == issuer_cert_hash_expected);
-
-            let pan = find_data_item(&data_items, "5a")?.ok_or(anyhow!("PAN not found"))?;
-            println!("pan: {}", hex::encode(&pan));
-
-            let issuer_pk_modulus = &[
-                &issuer_cert[15..][..(issuer_cert.len() - 36)],
-                &issuer_pk_remainder,
-            ].concat();
-
-            let issuer_key = rsa::RsaPublicKey::new(
-                rsa::BigUint::from_bytes_be(&issuer_pk_modulus),
-                rsa::BigUint::from_bytes_be(&issuer_pk_exponent),
-            )?;
-
-            let icc_cert_raw = find_data_item(&data_items, "9f46")?.ok_or(anyhow!("icc cert missing"))?;
-            ensure!(issuer_key.n().bits() == icc_cert_raw.len() * 8);
-
-            let icc_cert: rsa::BigUint = rsa::hazmat::rsa_encrypt(&issuer_key, &rsa::BigUint::from_bytes_be(&icc_cert_raw))?;
-            let icc_cert = icc_cert.to_bytes_be();
-            println!("icc cert: {}", hex::encode(&icc_cert));
-
-            ensure!(issuer_key.n().bits() == icc_cert.len() * 8);
-            ensure!(*icc_cert.last().unwrap() == 0xbc);
-            ensure!(icc_cert[0] == 0x6a);
-            ensure!(icc_cert[1] == 0x04);
-
-            let icc_pk_remainder = find_data_item(&data_items, "9f48")?.unwrap_or(vec![]);
-            let icc_pk_exponent = find_data_item(&data_items, "9f47")?.ok_or(anyhow!("missing icc public key exponent"))?;
-
-            let mut icc_cert_hash_contents = [
-                &icc_cert[1..][..(icc_cert.len() - 22)],
-                &icc_pk_remainder,
-                &icc_pk_exponent,
-                &dda_byte_buf,
-            ].concat();
-
-            if let Some(sda_tag_list) = find_data_item(&data_items, "9f4a")? {
-                for x in sda_tag_list {
-                    icc_cert_hash_contents.append(&mut find_data_item(&data_items, &format!("{}", hex::encode(&[x])))?.ok_or(anyhow!("data item {} from SDA tag list not found", hex::encode(&[x])))?);
-                }
-            }
-
-            println!("icc_cert_hash_contents: {}", hex::encode(&icc_cert_hash_contents));
-
-            let icc_cert_hash = sha1::Sha1::digest(&icc_cert_hash_contents).to_vec();
-            println!("icc cert hash: {}", hex::encode(&icc_cert_hash));
-    
-            let icc_cert_hash_expected = &icc_cert[(15+(icc_cert.len() - 36))..][0..20];
-            println!("expected: {}", hex::encode(icc_cert_hash_expected));
-
-            ensure!(&icc_cert_hash == icc_cert_hash_expected);
-
-            let icc_cert_mod_part_len = icc_cert[19];
-            let mut icc_cert_mod_part: Vec<u8> = icc_cert[21..][..(icc_cert.len() - 42)].to_vec();
-            icc_cert_mod_part.truncate(icc_cert_mod_part_len.into());
-
-            let icc_pk_modulus = &[
-                icc_cert_mod_part.as_slice(),
-                icc_pk_remainder.as_slice(),
-            ].concat();
-
-            let icc_key = rsa::RsaPublicKey::new(
-                rsa::BigUint::from_bytes_be(&icc_pk_modulus),
-                rsa::BigUint::from_bytes_be(&icc_pk_exponent),
-            )?;
-
-            // let nonce = hex::decode("deadbeef")?;
-
-            // let sdad_raw = do_apdu(&card, apdu::Command::new_with_payload(0, 0x88, 0, 0, &nonce))??;
-            // let sdad_raw = hex::decode("7781949F4B819016F01AAA086BBDFC4FD32BF5B273B729AE465D90F25771C07FAD6615896D9DCD3E58DE3EEEBBAB306BBEBD6B4A1C692AAE42D2BB6875A9A9D0653F5FFE93D51851FAB305CE92152AB10F9883D370D1317E8E58BA3F45054B8AFC0277E0FB9163BB978C237C7006FD70B596B2521F31A3D16BB5EAE81E9C3EBB1F8A679F4FE4A7E4FCBC15DED52E43CB2466A75A57D7DB")?;
-            // ensure!(icc_key.n().bits() == sdad_raw.len() * 8);
-            // println!("sdad_raw: {}", hex::encode_upper(&sdad_raw.to_vec()));
-
-            // let sdad: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&sdad_raw))?;
-            // let sdad = sdad.to_bytes_be();
-            // println!("sdad: {}", hex::encode(&sdad));
-
-            // ensure!(icc_key.n().bits() == sdad.len() * 8);
-            // ensure!(*sdad.last().unwrap() == 0xbc);
-            // ensure!(sdad[0] == 0x6a);
-            // ensure!(sdad[1] == 0x05);
-
-            let cdol1_raw = find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?;
-            let cdol1_raw = Tlv::parse_tag_list(&cdol1_raw)?;
-            let mut cdol1_iter = cdol1_raw.chunks_exact(2);
-            let mut cdol1 = vec![];
-            while let Some(x) = cdol1_iter.next() {
-                let [tag, len]: [tlv::Tag; 2] = x.try_into().unwrap();
-                cdol1.push((tag, len));
-            }
-            ensure!(cdol1_iter.remainder().len() == 0);
-
-            let tx_data_len = cdol1.iter().map(|x| x.1).reduce(|x, y| x + y).unwrap_or_default();
-            println!("tx_data_len: {}", tx_data_len);
-
-            let tx_data = vec![0; tx_data_len];
-            let arqc = do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xae, 0x90, 0, &tx_data))??;
-
-            println!("ARQC: {}", hex::encode(&arqc));
-
-            let arqc = Tlv::from_vec(&arqc)?;
-
-            println!("{}", arqc.to_string());
-
-            let arqc_sig_raw = find_val_raw(&arqc, "77 / 9f4b")?.ok_or(anyhow!("ARQC CDA sig missing"))?;
-            ensure!(icc_key.n().bits() == arqc_sig_raw.len() * 8);
-            let arqc_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&arqc_sig_raw))?;
-            let arqc_sig = arqc_sig.to_bytes_be();
-            println!("ARQC sig: {}", hex::encode(&arqc_sig));
-
-            ensure!(icc_key.n().bits() == arqc_sig.len() * 8);
-            ensure!(*arqc_sig.last().unwrap() == 0xbc);
-            ensure!(arqc_sig[0] == 0x6a);
-            ensure!(arqc_sig[1] == 0x05);
-
-            let mut arqc_sig_hash_contents = [
-                &arqc_sig[1..][..(arqc_sig.len() - 22)],
-                &[0x00, 0x00, 0x00, 0x00],
-            ].concat();
-
-            println!("arqc_sig_hash_contents: {}", hex::encode(&arqc_sig_hash_contents));
-
-            let arqc_sig_hash: Vec<u8> = sha1::Sha1::digest(&arqc_sig_hash_contents).to_vec();
-            println!("arqc cert hash: {}", hex::encode(&arqc_sig_hash));
-
-            let arqc_cert_hash_expected = &arqc_sig[(arqc_sig.len() - 21)..][0..20];
-            println!("expected: {}", hex::encode(arqc_cert_hash_expected));
-
-            ensure!(&arqc_sig_hash == arqc_cert_hash_expected);
-
-            println!("✅ Done!");
+            // Send the proof transaction
+            let proof_tx_hash = client.send_tx_proof(proof_tx).await.unwrap();
+            println!("✅ Proof tx sent. Tx hash: {}", proof_tx_hash);
         }
     }
     Ok(())
@@ -382,7 +202,7 @@ async fn main() -> Result<()> {
 
 #[derive(Clone, Debug)]
 struct APDUError {
-    payload: Vec<u8>,
+    _payload: Vec<u8>,
     sw: u16,
 }
 
@@ -408,7 +228,7 @@ fn do_apdu(card: &pcsc::Card, cmd: apdu::Command) -> Result<Result<Vec<u8>, APDU
     let rapdu = rapdu[0..(rapdu.len() - 2)].to_vec();
     match sw {
         0x9000 => Ok(Ok(rapdu)),
-        _ => Ok(Err(APDUError { payload: rapdu, sw }))
+        _ => Ok(Err(APDUError { _payload: rapdu, sw }))
     }
 }
 
@@ -426,3 +246,256 @@ fn find_data_item(data_items: &[Tlv], path: &str) -> Result<Option<Vec<u8>>> {
     }
     Ok(None)
 }
+
+fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Result<u32>) -> Result<CardThings> {
+    println!("Establishing PC/SC context...");
+    let ctx = pcsc::Context::establish(pcsc::Scope::User)?;
+    println!("Listing readers...");
+    let readers = ctx.list_readers_owned()?;
+    for (i, reader_name) in readers.iter().enumerate() {
+        println!("\t{} - {:?}", i, reader_name);
+    }
+    if readers.len() == 0 {
+        bail!("No card readers found!");
+    }
+    println!("Connecting to reader {}...", reader_index);
+    let card = ctx.connect(&readers[reader_index], pcsc::ShareMode::Shared, Protocols::ANY)?;
+
+    println!("Getting card status...");
+    let status = card.status2_owned()?;
+    println!("ATR: {}", hex::encode_upper(status.atr()));
+
+    let out = Tlv::from_vec(&match do_apdu(&card, apdu::command::select_file(0x04, 0, "1PAY.SYS.DDF01".as_bytes()).into())? {
+        Err(APDUError { sw: 0x6a82, .. }) => do_apdu(&card, apdu::command::select_file(0x04, 0, "2PAY.SYS.DDF01".as_bytes()).into())?,
+        x => x,
+    }?)?;
+
+    let aid = find_val_raw(&out, "6F / A5 / BF0C / 61 / 4F")?.ok_or(anyhow!("AID not found"))?;
+    println!("Selecting AID {}...", hex::encode_upper(&aid));
+
+    let ats = Tlv::from_vec(&do_apdu(&card, apdu::command::select_file(0x04, 0, &aid).into())??)?;
+    println!("ATS: {}", hex::encode_upper(&ats.to_vec()));
+
+    let label = find_val_raw(&ats, "6F / A5 / 50")?;
+    let lang = find_val_raw(&ats, "6F / A5 / 5F2D")?;
+    let country = find_val_raw(&ats, "6F / A5 / BF0C / 5F55")?;
+
+    println!("Label: {}", label.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
+    println!("Language: {}", lang.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
+    println!("Country: {}", country.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
+
+    let processing_options = Tlv::from_vec(&do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xa8, 0, 0, &Tlv::new(0x83, Value::Val(vec![]))?.to_vec()))??)?;
+    println!("GET PROCESSING OPTIONS: {}", hex::encode_upper(&processing_options.to_vec()));
+
+    // let atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x36))??;
+    // println!("ATC: {}", hex::encode(atc));
+    // let last_online_atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x13))??;
+    // println!("Last online ATC: {}", hex::encode(last_online_atc));
+
+    let afl = find_val_raw(&processing_options, "77 / 94")?.ok_or(anyhow!("AFL not found"))?;
+    let mut afl_items = afl.chunks_exact(4);
+    let mut data_items = vec![ processing_options ];
+    let mut dda_byte_buf = vec![];
+    while let Some(afl_item) = afl_items.next() {
+        let [sfi, srec, erec, dar] = TryInto::<[u8; 4]>::try_into(afl_item).unwrap();
+        ensure!(sfi & 0b111 == 0);
+        let sfi = sfi >> 3;
+        for i in srec..=erec {
+            println!("Reading file {}, record {}", sfi, i);
+            let tlv_buf = do_apdu(&card, apdu::Command::new(0, 0xb2, i, (sfi << 3) | 0b100))??;
+            let tlv = Tlv::from_vec(&tlv_buf)?;
+            ensure!(tlv.tag() == 0x70);
+            println!("{}", tlv.val());
+            let val = tlv.val().to_vec();
+
+            if i - srec < dar {
+                if sfi > 10 {
+                    dda_byte_buf.append(&mut tlv.to_vec());
+                } else {
+                    dda_byte_buf.append(&mut val.clone());
+                }
+            }
+
+            data_items.push(tlv);
+        }
+    }
+    ensure!(afl_items.remainder().len() == 0);
+
+    let rid = u64::from_be_bytes([0,0,0,aid[0],aid[1],aid[2],aid[3],aid[4]]);
+    let ca_idx = find_data_item(&data_items, "8F")?.ok_or(anyhow!("ca_idx missing"))?;
+    ensure!(ca_idx.len() == 1);
+    let ca_idx = ca_idx[0];
+    println!("ca_idx: {}/{}", hex::encode(&rid.to_be_bytes()), hex::encode(&[ca_idx]));
+
+    let ca_key = get_ca_key(rid, ca_idx).ok_or(anyhow!("unknown CA key"))?;
+
+    let issuer_cert_raw = find_data_item(&data_items, "90")?.ok_or(anyhow!("issuer cert missing"))?;
+    ensure!(ca_key.n().bits() == issuer_cert_raw.len() * 8);
+
+    let issuer_cert: rsa::BigUint = rsa::hazmat::rsa_encrypt(&ca_key, &rsa::BigUint::from_bytes_be(&issuer_cert_raw))?;
+    let issuer_cert = issuer_cert.to_bytes_be();
+    println!("issuer cert: {}", hex::encode(&issuer_cert));
+
+    ensure!(ca_key.n().bits() == issuer_cert.len() * 8);
+    ensure!(*issuer_cert.last().unwrap() == 0xbc);
+    ensure!(issuer_cert[0] == 0x6a);
+    ensure!(issuer_cert[1] == 0x02);
+
+    let issuer_pk_remainder = find_data_item(&data_items, "92")?.unwrap_or(vec![]);
+    let issuer_pk_exponent = find_data_item(&data_items, "9f32")?.ok_or(anyhow!("missing issuer public key exponent"))?;
+
+    let issuer_cert_hash_contents = &[
+        &issuer_cert[1..][0..(14 + (issuer_cert.len() - 36))],
+        &issuer_pk_remainder,
+        &issuer_pk_exponent,
+    ].concat();
+    println!("issuer_cert_hash_contents: {}", hex::encode(&issuer_cert_hash_contents));
+
+    let issuer_cert_hash = sha1::Sha1::digest(&issuer_cert_hash_contents).to_vec();
+    println!("issuer cert hash: {}", hex::encode(&issuer_cert_hash));
+
+    let issuer_cert_hash_expected = &issuer_cert[(15+(issuer_cert.len() - 36))..][0..20];
+    println!("expected: {}", hex::encode(issuer_cert_hash_expected));
+
+    ensure!(&issuer_cert_hash == issuer_cert_hash_expected);
+
+    let pan = find_data_item(&data_items, "5a")?.ok_or(anyhow!("PAN not found"))?;
+    println!("pan: {}", hex::encode(&pan));
+
+    let issuer_pk_modulus = &[
+        &issuer_cert[15..][..(issuer_cert.len() - 36)],
+        &issuer_pk_remainder,
+    ].concat();
+
+    let issuer_key = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&issuer_pk_modulus),
+        rsa::BigUint::from_bytes_be(&issuer_pk_exponent),
+    )?;
+
+    let icc_cert_raw = find_data_item(&data_items, "9f46")?.ok_or(anyhow!("icc cert missing"))?;
+    ensure!(issuer_key.n().bits() == icc_cert_raw.len() * 8);
+
+    let icc_cert: rsa::BigUint = rsa::hazmat::rsa_encrypt(&issuer_key, &rsa::BigUint::from_bytes_be(&icc_cert_raw))?;
+    let icc_cert = icc_cert.to_bytes_be();
+    println!("icc cert: {}", hex::encode(&icc_cert));
+
+    ensure!(issuer_key.n().bits() == icc_cert.len() * 8);
+    ensure!(*icc_cert.last().unwrap() == 0xbc);
+    ensure!(icc_cert[0] == 0x6a);
+    ensure!(icc_cert[1] == 0x04);
+
+    let icc_pk_remainder = find_data_item(&data_items, "9f48")?.unwrap_or(vec![]);
+    let icc_pk_exponent = find_data_item(&data_items, "9f47")?.ok_or(anyhow!("missing icc public key exponent"))?;
+
+    let mut icc_cert_hash_contents = [
+        &icc_cert[1..][..(icc_cert.len() - 22)],
+        &icc_pk_remainder,
+        &icc_pk_exponent,
+        &dda_byte_buf,
+    ].concat();
+
+    if let Some(sda_tag_list) = find_data_item(&data_items, "9f4a")? {
+        for x in sda_tag_list {
+            icc_cert_hash_contents.append(&mut find_data_item(&data_items, &format!("{}", hex::encode(&[x])))?.ok_or(anyhow!("data item {} from SDA tag list not found", hex::encode(&[x])))?);
+        }
+    }
+
+    println!("icc_cert_hash_contents: {}", hex::encode(&icc_cert_hash_contents));
+
+    let icc_cert_hash = sha1::Sha1::digest(&icc_cert_hash_contents).to_vec();
+    println!("icc cert hash: {}", hex::encode(&icc_cert_hash));
+
+    let icc_cert_hash_expected = &icc_cert[(15+(icc_cert.len() - 36))..][0..20];
+    println!("expected: {}", hex::encode(icc_cert_hash_expected));
+
+    ensure!(&icc_cert_hash == icc_cert_hash_expected);
+
+    let icc_cert_mod_part_len = icc_cert[19];
+    let mut icc_cert_mod_part: Vec<u8> = icc_cert[21..][..(icc_cert.len() - 42)].to_vec();
+    icc_cert_mod_part.truncate(icc_cert_mod_part_len.into());
+
+    let icc_pk_modulus = &[
+        icc_cert_mod_part.as_slice(),
+        icc_pk_remainder.as_slice(),
+    ].concat();
+
+    let icc_key = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&icc_pk_modulus),
+        rsa::BigUint::from_bytes_be(&icc_pk_exponent),
+    )?;
+
+    let icc_key_hash = CardThings {
+        icc_pk_modulus: icc_pk_modulus.clone(),
+        icc_pk_exponent: icc_pk_exponent.clone(),
+        arqc_sig_raw: vec![],
+        arqc_sig_hash_contents: vec![],
+    }.icc_key_hash();
+    let nonce = nonce_getter(icc_key_hash)?;
+
+    let cdol1_raw = find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?;
+    let cdol1_raw = Tlv::parse_tag_list(&cdol1_raw)?;
+    let mut cdol1_iter = cdol1_raw.chunks_exact(2);
+    let mut cdol1 = vec![];
+    while let Some(x) = cdol1_iter.next() {
+        let [tag, len]: [tlv::Tag; 2] = x.try_into().unwrap();
+        cdol1.push((tag, len));
+    }
+    ensure!(cdol1_iter.remainder().len() == 0);
+
+    let tx_data = cdol1.iter().flat_map(|&(tag, len)| {
+        if tag == 0x9f37 {
+            u32::to_be_bytes(nonce).to_vec()
+        } else {
+            vec![0u8; len]
+        }
+    }).collect::<Vec<u8>>();
+
+    let arqc = do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xae, 0x90, 0, &tx_data))??;
+
+    println!("ARQC: {}", hex::encode(&arqc));
+
+    let arqc = Tlv::from_vec(&arqc)?;
+
+    println!("{}", arqc.to_string());
+
+    let arqc_sig_raw = find_val_raw(&arqc, "77 / 9f4b")?.ok_or(anyhow!("ARQC CDA sig missing"))?;
+    ensure!(icc_key.n().bits() == arqc_sig_raw.len() * 8);
+    let arqc_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&arqc_sig_raw))?;
+    let arqc_sig = arqc_sig.to_bytes_be();
+    println!("ARQC sig: {}", hex::encode(&arqc_sig));
+
+    ensure!(icc_key.n().bits() == arqc_sig.len() * 8);
+    ensure!(*arqc_sig.last().unwrap() == 0xbc);
+    ensure!(arqc_sig[0] == 0x6a);
+    ensure!(arqc_sig[1] == 0x05);
+
+    let arqc_sig_hash_contents = [
+        &arqc_sig[1..][..(arqc_sig.len() - 22)],
+        &nonce.to_be_bytes(),
+    ].concat();
+
+    println!("arqc_sig_hash_contents: {}", hex::encode(&arqc_sig_hash_contents));
+
+    let arqc_sig_hash: Vec<u8> = sha1::Sha1::digest(&arqc_sig_hash_contents).to_vec();
+    println!("arqc cert hash: {}", hex::encode(&arqc_sig_hash));
+
+    let arqc_cert_hash_expected = &arqc_sig[(arqc_sig.len() - 21)..][0..20];
+    println!("expected: {}", hex::encode(arqc_cert_hash_expected));
+
+    ensure!(&arqc_sig_hash == arqc_cert_hash_expected);
+
+    let out = CardThings {
+        icc_pk_modulus: icc_pk_modulus.clone(),
+        icc_pk_exponent: icc_pk_exponent.clone(),
+        arqc_sig_raw,
+        arqc_sig_hash_contents,
+    };
+
+    println!("Reverifying...");
+    out.verify_card_things(nonce).or(Err(anyhow!("Reverification failed!")))?;
+
+    println!("✅ Done!");
+
+    Ok(out)
+}
+
