@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
             println!("🚀 Executed: {}", String::from_utf8(program_output.clone()).unwrap());
 
             // Generate the zk proof
-            let proof = prover.prove(program_output, &[calldata]).await.unwrap();
+            let proof = prover.prove(initial_state.as_bytes().unwrap(), &[calldata]).await.unwrap();
 
             let proof_tx = ProofTransaction {
                 proof,
