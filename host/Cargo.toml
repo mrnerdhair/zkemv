@@ -14,3 +14,9 @@ clap = { version = "4.5.23", features = ["derive"] }
 borsh = "1.5.7"
 tokio = { version = "1.42.0", features = ["full", "tracing"] }
 anyhow = "1.0.98"
+pcsc = "2"
+hex = "0.4.3"
+apdu = "0.4.0"
+tlv_parser = "0.10.0"
+rsa = { version = "0.9.8", features = ["hazmat"] }
+sha1 = "0.10.6"
