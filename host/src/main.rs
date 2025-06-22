@@ -47,6 +47,8 @@ enum Commands {
     VerifyIdentity {
         #[arg(long, default_value = "0")]
         reader_index: usize,
+        #[arg(long)]
+        deadbeef: bool
     },
 }
 
@@ -137,7 +139,7 @@ async fn main() -> Result<()> {
             let proof_tx_hash = client.send_tx_proof(proof_tx).await.unwrap();
             println!("✅ Proof tx sent. Tx hash: {}", proof_tx_hash);
         }
-        Commands::VerifyIdentity { reader_index } => {
+        Commands::VerifyIdentity { reader_index, deadbeef} => {
             // Fetch the initial state from the node
             let initial_state: ZkEmv = client
                 .get_contract(contract_name.clone().into())
@@ -148,8 +150,13 @@ async fn main() -> Result<()> {
 
             // Do card things
             let card_things = do_card_things(
-                reader_index, |x| initial_state.get_nonce(x).ok_or(anyhow!("nonce not found for key hash {} in {:?}", hex::encode(x), initial_state)))?;
-            
+                reader_index,
+                |x| {
+                    if deadbeef { return Ok(0xdeadbeef); }
+                    initial_state.get_nonce(x).ok_or(anyhow!("nonce not found for key hash {} in {:?}", hex::encode(x), initial_state))
+                },
+            )?;
+        
             // ----
             // Build the blob transaction
             // ----
@@ -218,9 +225,9 @@ fn do_apdu(card: &pcsc::Card, cmd: apdu::Command) -> Result<Result<Vec<u8>, APDU
     let mut apdu_buf = vec![0u8; cmd.len()];
     let mut rapdu_buf = vec![0u8; MAX_BUFFER_SIZE];
     cmd.write(&mut apdu_buf);
-    println!("-> {}", hex::encode_upper(&apdu_buf));
+    //println!("-> {}", hex::encode_upper(&apdu_buf));
     let rapdu = card.transmit(&apdu_buf, &mut rapdu_buf)?;
-    println!("<- {}", hex::encode_upper(rapdu));
+    //println!("<- {}", hex::encode_upper(rapdu));
     if rapdu.len() < 2 {
         bail!("APDU response too short");
     }
@@ -431,6 +438,8 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
         arqc_sig_hash_contents: vec![],
     }.icc_key_hash();
     let nonce = nonce_getter(icc_key_hash)?;
+
+    println!("Using nonce: 0x{}", hex::encode(nonce.to_be_bytes()));
 
     let cdol1_raw = find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?;
     let cdol1_raw = Tlv::parse_tag_list(&cdol1_raw)?;
