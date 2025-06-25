@@ -1,3 +1,6 @@
 db/
 target/
 .vscode/
+profile.pb
+.env.private
+.env
