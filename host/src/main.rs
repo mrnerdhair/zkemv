@@ -49,7 +49,7 @@ enum Commands {
         #[arg(long, default_value = "0")]
         reader_index: usize,
         #[arg(long)]
-        deadbeef: bool
+        nonce: Option<u32>,
     },
 }
 
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
             let proof_tx_hash = client.send_tx_proof(proof_tx).await.unwrap();
             println!("✅ Proof tx sent. Tx hash: {}", proof_tx_hash);
         }
-        Commands::VerifyIdentity { reader_index, deadbeef} => {
+        Commands::VerifyIdentity { reader_index, nonce: nonce_override} => {
             // Fetch the initial state from the node
             let initial_state: ZkEmv = client
                 .get_contract(contract_name.clone().into())
@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
             let card_things = do_card_things(
                 reader_index,
                 |x| {
-                    if deadbeef { return Ok(0xdeadbeef); }
+                    if let Some(x) = nonce_override { return Ok(x); }
                     initial_state.get_nonce(x).ok_or(anyhow!("nonce not found for key hash {} in {:?}", hex::encode(x), initial_state))
                 },
             )?;
@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
 
             // Generate the zk proof
             let start = Instant::now();
-            let proof = prover.prove(initial_state.as_bytes().unwrap(), &[calldata]).await.unwrap();
+            let proof = prover.prove(initial_state.as_bytes().expect("initial state serialization failed"), &[calldata]).await?;
             let duration = start.elapsed();
             println!("Proving took: {:?}", duration);
 
