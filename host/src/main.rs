@@ -351,9 +351,11 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     println!("issuer cert: {}", hex::encode(&issuer_cert));
 
     ensure!(ca_key.n().bits() == issuer_cert.len() * 8);
-    ensure!(*issuer_cert.last().unwrap() == 0xbc);
-    ensure!(issuer_cert[0] == 0x6a);
-    ensure!(issuer_cert[1] == 0x02);
+    ensure!(*issuer_cert.last().unwrap() == 0xbc); // recovered data trailer
+    ensure!(issuer_cert[0] == 0x6a); // recovered data header
+    ensure!(issuer_cert[1] == 0x02); // certificate format
+    ensure!(issuer_cert[11] == 0x01); // hash algorithm indicator = SHA-1
+    ensure!(issuer_cert[12] == 0x01); // issuer public key algorithm indicator = RSA
 
     let issuer_pk_remainder = find_data_item(&data_items, "92")?.unwrap_or(vec![]);
     let issuer_pk_exponent = find_data_item(&data_items, "9f32")?.ok_or(anyhow!("missing issuer public key exponent"))?;
@@ -376,10 +378,15 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     let pan = find_data_item(&data_items, "5a")?.ok_or(anyhow!("PAN not found"))?;
     println!("pan: {}", hex::encode(&pan));
 
+    let issuer_pk_modulus_len: usize = issuer_cert[13].into();
+    let issuer_pk_exponent_len: usize = issuer_cert[14].into();
+
     let issuer_pk_modulus = &[
-        &issuer_cert[15..][..(issuer_cert.len() - 36)],
+        &issuer_cert[15..][..(std::cmp::min(issuer_pk_modulus_len, issuer_cert.len() - 36))],
         &issuer_pk_remainder,
     ].concat();
+    ensure!(issuer_pk_modulus.len() == issuer_pk_modulus_len);
+    ensure!(issuer_pk_exponent.len() == issuer_pk_exponent_len);
 
     let issuer_key = rsa::RsaPublicKey::new(
         rsa::BigUint::from_bytes_be(&issuer_pk_modulus),
@@ -397,6 +404,8 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     ensure!(*icc_cert.last().unwrap() == 0xbc);
     ensure!(icc_cert[0] == 0x6a);
     ensure!(icc_cert[1] == 0x04);
+    ensure!(icc_cert[17] == 0x01); // hash algorithm indicator = SHA-1
+    ensure!(icc_cert[18] == 0x01); // icc public key algorithm indicator = RSA
 
     let icc_pk_remainder = find_data_item(&data_items, "9f48")?.unwrap_or(vec![]);
     let icc_pk_exponent = find_data_item(&data_items, "9f47")?.ok_or(anyhow!("missing icc public key exponent"))?;
@@ -424,14 +433,15 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
 
     ensure!(&icc_cert_hash == icc_cert_hash_expected);
 
-    let icc_cert_mod_part_len = icc_cert[19];
-    let mut icc_cert_mod_part: Vec<u8> = icc_cert[21..][..(icc_cert.len() - 42)].to_vec();
-    icc_cert_mod_part.truncate(icc_cert_mod_part_len.into());
+    let icc_pk_modulus_len: usize = icc_cert[19].into();
+    let icc_pk_exponent_len: usize = icc_cert[20].into();
 
     let icc_pk_modulus = &[
-        icc_cert_mod_part.as_slice(),
+        &icc_cert[21..][..(std::cmp::min(icc_pk_modulus_len, icc_cert.len() - 42))],
         icc_pk_remainder.as_slice(),
     ].concat();
+    ensure!(icc_pk_modulus.len() == icc_pk_modulus_len);
+    ensure!(icc_pk_exponent.len() == icc_pk_exponent_len);
 
     let icc_key = rsa::RsaPublicKey::new(
         rsa::BigUint::from_bytes_be(&icc_pk_modulus),
