@@ -261,6 +261,18 @@ fn find_data_item(data_items: &[Tlv], path: &str) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
+fn parse_tag_list(buf: &[u8]) -> Result<Vec<(usize, usize)>> {
+    let list_raw: Vec<usize> = Tlv::parse_tag_list(&buf)?;
+    let mut list_iter = list_raw.chunks_exact(2);
+    let mut list = vec![];
+    while let Some(x) = list_iter.next() {
+        let [tag, len]: [tlv::Tag; 2] = x.try_into().unwrap();
+        list.push((tag, len));
+    }
+    ensure!(list_iter.remainder().len() == 0);
+    Ok(list)
+}
+
 fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Result<u32>) -> Result<CardThings> {
     println!("Establishing PC/SC context...");
     let ctx = pcsc::Context::establish(pcsc::Scope::User)?;
@@ -298,7 +310,35 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     println!("Language: {}", lang.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
     println!("Country: {}", country.map(|x| String::from_utf8_lossy(&x).to_string()).unwrap_or("(unknown)".to_string()));
 
-    let processing_options = Tlv::from_vec(&do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xa8, 0, 0, &Tlv::new(0x83, Value::Val(vec![]))?.to_vec()))??)?;
+    let pdol = parse_tag_list(&find_val_raw(&ats, "6F / A5 / 9F38")?.unwrap_or(vec![]))?;
+
+    let processing_options_payload = pdol.iter().flat_map(|&(tag, len)| {
+        match tag {
+            0x9f66 => { // Terminal Transaction Qualifiers
+                assert_eq!(len, 4);
+                vec![0x31, 0x00, 0x00, 0x00]
+            },
+            0x9f1a => { // Terminal Country Code
+                assert_eq!(len, 2);
+                vec![0x02, 0x50] // France
+            },
+            0x5f2a => { // Currency Code
+                assert_eq!(len, 2);
+                vec![0x09, 0x78] // Euro
+            },
+            0x9a => { // Transaction Date
+                assert_eq!(len, 3);
+                vec![0u8; 3] // vec![0xYY, 0xMM, 0xDD]
+            },
+            0x9f37 => { // Unpredictable Number
+                assert_eq!(len, 4);
+                vec![0xde, 0xad, 0xbe, 0xef]
+            },
+            _ => vec![0u8; len],
+        }
+    }).collect::<Vec<u8>>();
+
+    let processing_options = Tlv::from_vec(&do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xa8, 0, 0, &Tlv::new(0x83, Value::Val(processing_options_payload))?.to_vec()))??)?;
     println!("GET PROCESSING OPTIONS: {}", hex::encode_upper(&processing_options.to_vec()));
 
     // let atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x36))??;
@@ -458,21 +498,12 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
 
     println!("Using nonce: 0x{}", hex::encode(nonce.to_be_bytes()));
 
-    let cdol1_raw = find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?;
-    let cdol1_raw = Tlv::parse_tag_list(&cdol1_raw)?;
-    let mut cdol1_iter = cdol1_raw.chunks_exact(2);
-    let mut cdol1 = vec![];
-    while let Some(x) = cdol1_iter.next() {
-        let [tag, len]: [tlv::Tag; 2] = x.try_into().unwrap();
-        cdol1.push((tag, len));
-    }
-    ensure!(cdol1_iter.remainder().len() == 0);
+    let cdol1 = parse_tag_list(&find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?)?;
 
     let tx_data = cdol1.iter().flat_map(|&(tag, len)| {
-        if tag == 0x9f37 {
-            u32::to_be_bytes(nonce).to_vec()
-        } else {
-            vec![0u8; len]
+        match tag {
+            0x9f37 => u32::to_be_bytes(nonce).to_vec(),
+            _ => vec![0u8; len],
         }
     }).collect::<Vec<u8>>();
 
