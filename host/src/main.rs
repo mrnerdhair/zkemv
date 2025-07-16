@@ -307,12 +307,24 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     let status = card.status2_owned()?;
     println!("ATR: {}", hex::encode_upper(status.atr()));
 
-    let out = Tlv::from_vec(&match do_apdu(&card, apdu::command::select_file(0x04, 0, "1PAY.SYS.DDF01".as_bytes()).into())? {
-        Err(APDUError { sw: 0x6a82, .. }) => do_apdu(&card, apdu::command::select_file(0x04, 0, "2PAY.SYS.DDF01".as_bytes()).into())?,
-        x => x,
-    }?)?;
+    let mut i: usize = 0;
+    let payloads = ["2PAY.SYS.DDF01".as_bytes(), "1PAY.SYS.DDF01".as_bytes()];
+    let aid = loop {
+        let payload = payloads.get(i);
+        let payload = *(if let Some(x) = payload { x } else { break None });
+        i += 1;
 
-    let aid = find_val_raw(&out, "6F / A5 / BF0C / 61 / 4F")?.ok_or(anyhow!("AID not found"))?;
+        let out = do_apdu(&card, apdu::command::select_file(0x04, 0, payload).into())?;
+        let aid = match out {
+            Ok(x) => {
+                let tlv = Tlv::from_vec(&x)?;
+                Ok(find_val_raw(&tlv, "6F / A5 / BF0C / 61 / 4F")?)
+            },
+            Err(APDUError { sw: 0x6a82, .. }) => Ok(None),
+            Err(x) => Err(x),
+        }?;
+        if aid.is_some() { break aid; }
+    }.ok_or(anyhow!("AID not found"))?;
     println!("Selecting AID {}...", hex::encode_upper(&aid));
 
     let ats = Tlv::from_vec(&do_apdu(&card, apdu::command::select_file(0x04, 0, &aid).into())??)?;
