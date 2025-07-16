@@ -243,6 +243,17 @@ fn do_apdu(card: &pcsc::Card, cmd: apdu::Command) -> Result<Result<Vec<u8>, APDU
     let rapdu = rapdu[0..(rapdu.len() - 2)].to_vec();
     match sw {
         0x9000 => Ok(Ok(rapdu)),
+        // Wrong response length, re-issue command
+        0x6c00..=0x6cff => {
+            let mut cmd_with_len = cmd;
+            cmd_with_len.le = Some(sw & 0xff);
+            do_apdu(card, cmd_with_len)
+        }
+        // More data available, issue GET RESPONSE
+        0x6100..=0x61ff => {
+            let rest = do_apdu(card, apdu::Command {cla: 0, ins: 0xc0, p1: 0, p2: 0, payload: None, le: Some(sw & 0xff)})??;
+            Ok(Ok([rapdu, rest].concat()))
+        },
         _ => Ok(Err(APDUError { _payload: rapdu, sw }))
     }
 }
