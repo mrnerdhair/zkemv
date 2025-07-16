@@ -364,9 +364,21 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
                 assert_eq!(len, 4);
                 vec![0xde, 0xad, 0xbe, 0xef]
             },
-            0x9f02 => { // Amount authorized
+            0x9f02 => { // Amount, authorized
                 assert_eq!(len, 6);
                 vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+            },
+            0x9f03 => { // Amount, other
+                assert_eq!(len, 6);
+                vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+            },
+            0x95 => { // Terminal Verification Results
+                assert_eq!(len, 5);
+                vec![0u8, 5]
+            },
+            0x9c => { // Transaction Type
+                assert_eq!(len, 1);
+                vec![0u8, 1]
             },
             _ => vec![0u8; len],
         }
