@@ -230,7 +230,7 @@ impl std::fmt::Display for APDUError {
 }
 
 fn do_apdu(card: &pcsc::Card, cmd: apdu::Command) -> Result<Result<Vec<u8>, APDUError>, anyhow::Error> {
-    let mut apdu_buf = vec![0u8; cmd.len() + 1];
+    let mut apdu_buf = vec![0u8; cmd.len()];
     let mut rapdu_buf = vec![0u8; MAX_BUFFER_SIZE];
     cmd.write(&mut apdu_buf);
     println!("-> {}", hex::encode_upper(&apdu_buf));
