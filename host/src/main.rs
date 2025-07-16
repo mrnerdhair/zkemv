@@ -332,15 +332,17 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
         match tag {
             0x9f66 => { // Terminal Transaction Qualifiers
                 assert_eq!(len, 4);
-                vec![0x31, 0x00, 0x00, 0x00]
+                vec![0x39, 0x00, 0x00, 0x00]
             },
             0x9f1a => { // Terminal Country Code
                 assert_eq!(len, 2);
-                vec![0x02, 0x50] // France
+                // vec![0x02, 0x50] // France
+                vec![0x08, 0x40] // USA
             },
             0x5f2a => { // Currency Code
                 assert_eq!(len, 2);
-                vec![0x09, 0x78] // Euro
+                // vec![0x09, 0x78] // Euro
+                vec![0x08, 0x40] // USD
             },
             0x9a => { // Transaction Date
                 assert_eq!(len, 3);
@@ -349,6 +351,10 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
             0x9f37 => { // Unpredictable Number
                 assert_eq!(len, 4);
                 vec![0xde, 0xad, 0xbe, 0xef]
+            },
+            0x9f02 => { // Amount authorized
+                assert_eq!(len, 6);
+                vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
             },
             _ => vec![0u8; len],
         }
