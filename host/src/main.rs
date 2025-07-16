@@ -392,7 +392,17 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     // let last_online_atc = do_apdu(&card, apdu::Command::new(0x80, 0xca, 0x9f, 0x13))??;
     // println!("Last online ATC: {}", hex::encode(last_online_atc));
 
-    let afl = find_val_raw(&processing_options, "77 / 94")?.ok_or(anyhow!("AFL not found"))?;
+    let afl = match find_val_raw(&processing_options, "77 / 94")? {
+        Some(x) => Some(x),
+        None => {
+            // Check for Response Message Template Format 1
+            if let Some(raw) = find_val_raw(&processing_options, "80")? {
+                Some(raw[2..].to_vec())
+            } else {
+                None
+            }
+        },
+    }.ok_or(anyhow!("AFL not found"))?;
     let mut afl_items = afl.chunks_exact(4);
     let mut data_items = vec![ processing_options ];
     let mut dda_byte_buf = vec![];
