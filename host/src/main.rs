@@ -331,7 +331,7 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     println!("ATR: {}", hex::encode_upper(status.atr()));
 
     let mut i: usize = 0;
-    let payloads = ["2PAY.SYS.DDF01".as_bytes(), "1PAY.SYS.DDF01".as_bytes()];
+    let payloads = ["1PAY.SYS.DDF01".as_bytes(), "2PAY.SYS.DDF01".as_bytes()];
     let aid = loop {
         let payload = payloads.get(i);
         let payload = *(if let Some(x) = payload { x } else { break None });
@@ -341,7 +341,17 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
         let aid = match out {
             Ok(x) => {
                 let tlv = Tlv::from_vec(&x)?;
-                Ok(find_val_raw(&tlv, "6F / A5 / BF0C / 61 / 4F")?)
+                let tlv = if let Some(aid) = find_val_raw(&tlv, "6F / A5 / BF0C / 61 / 4F")? {
+                    Some(aid)
+                } else if let Some(sfi) = find_val_raw(&tlv, "6F / A5 / 88")? {
+                    assert_eq!(sfi.len(), 1);
+                    let sfi = sfi[0];
+                    let tlv = read_record(&card, sfi, 1)?;
+                    find_val_raw(&tlv, "70 / 61 / 4F")?
+                } else {
+                    None
+                };
+                Ok(tlv)
             },
             Err(APDUError { sw: 0x6a82, .. }) => Ok(None),
             Err(x) => Err(x),
