@@ -614,7 +614,7 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
                 get_pdol_option(&(0x9f37, 4)),
                 get_pdol_option(&(0x9f02, 6)),
                 get_pdol_option(&(0x5f2a, 2)),
-                find_data_item(&data_items, "77 / 9f69")?.unwrap_or(vec![]),
+                find_data_item(&data_items, "9f69")?.unwrap_or(vec![]),
             ]),
             _ => Err(anyhow!("unsupported signature format")),
         })?.concat(),
