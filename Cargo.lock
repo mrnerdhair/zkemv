@@ -6713,8 +6713,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tlv_parser"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1ec81733847de9f966af633ecd698a0881e5b75f028cbab161c3f0669175c15"
+source = "git+https://github.com/mrnerdhair/tlv-parser#86a2050ce1a3566cdc83132a6fc01b3415db05ed"
 
 [[package]]
 name = "tokio"
