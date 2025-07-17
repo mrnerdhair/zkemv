@@ -53,8 +53,8 @@ pub enum ZkEmvAction {
 pub struct CardThings {
     pub icc_pk_modulus: Vec<u8>,
     pub icc_pk_exponent: Vec<u8>,
-    pub arqc_sig_raw: Vec<u8>,
-    pub arqc_sig_hash_contents: Vec<u8>,
+    pub card_sig_raw: Vec<u8>,
+    pub card_sig_hash_contents: Vec<u8>,
 }
 
 impl CardThings {
@@ -83,22 +83,22 @@ impl CardThings {
             rsa::BigUint::from_bytes_be(&self.icc_pk_exponent),
         ).or(Err(()))?;
 
-        if icc_key.n().bits() != self.arqc_sig_raw.len() * 8 { return Err(()); }
-        let arqc_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&self.arqc_sig_raw)).or(Err(()))?;
-        let arqc_sig = arqc_sig.to_bytes_be();
+        if icc_key.n().bits() != self.card_sig_raw.len() * 8 { return Err(()); }
+        let card_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&self.card_sig_raw)).or(Err(()))?;
+        let card_sig = card_sig.to_bytes_be();
 
-        if icc_key.n().bits() != arqc_sig.len() * 8 { return Err(()); }
-        if *arqc_sig.last().unwrap() != 0xbc { return Err(()); }
-        if arqc_sig[0] != 0x6a { return Err(()); }
-        if arqc_sig[1] != 0x05 { return Err(()); }
+        if icc_key.n().bits() != card_sig.len() * 8 { return Err(()); }
+        if *card_sig.last().unwrap() != 0xbc { return Err(()); }
+        if card_sig[0] != 0x6a { return Err(()); }
+        if card_sig[1] != 0x05 { return Err(()); }
 
-        let arqc_sig_hash: Vec<u8> = sha1::Sha1::digest(&self.arqc_sig_hash_contents).to_vec();
+        let card_sig_hash: Vec<u8> = sha1::Sha1::digest(&self.card_sig_hash_contents).to_vec();
 
-        let arqc_cert_hash_expected = &arqc_sig[(arqc_sig.len() - 21)..][0..20];
+        let card_sig_hash_expected = &card_sig[(card_sig.len() - 21)..][0..20];
 
-        if &arqc_sig_hash != arqc_cert_hash_expected { return Err(()); }
+        if &card_sig_hash != card_sig_hash_expected { return Err(()); }
 
-        if u32::from_be_bytes(self.arqc_sig_hash_contents[(self.arqc_sig_hash_contents.len() - 4)..].try_into().unwrap()) != nonce { return Err(()); }
+        if u32::from_be_bytes(self.card_sig_hash_contents[(self.card_sig_hash_contents.len() - 4)..].try_into().unwrap()) != nonce { return Err(()); }
 
         Ok(())
     }

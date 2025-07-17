@@ -558,8 +558,8 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     let icc_key_hash = CardThings {
         icc_pk_modulus: icc_pk_modulus.clone(),
         icc_pk_exponent: icc_pk_exponent.clone(),
-        arqc_sig_raw: vec![],
-        arqc_sig_hash_contents: vec![],
+        card_sig_raw: vec![],
+        card_sig_hash_contents: vec![],
     }.icc_key_hash();
     let nonce = nonce_getter(icc_key_hash)?;
 
@@ -578,41 +578,40 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
 
     println!("ARQC: {}", hex::encode(&arqc));
 
-    let arqc = Tlv::from_vec(&arqc)?;
+    let card_sig_raw = Tlv::from_vec(&arqc)?;
 
-    println!("{}", arqc.to_string());
+    println!("{}", card_sig_raw.to_string());
 
-    let arqc_sig_raw = find_val_raw(&arqc, "77 / 9f4b")?.ok_or(anyhow!("ARQC CDA sig missing"))?;
-    ensure!(icc_key.n().bits() == arqc_sig_raw.len() * 8);
-    let arqc_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&arqc_sig_raw))?;
-    let arqc_sig = arqc_sig.to_bytes_be();
-    println!("ARQC sig: {}", hex::encode(&arqc_sig));
+    ensure!(icc_key.n().bits() == card_sig_raw.len() * 8);
+    let card_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&card_sig_raw))?;
+    let card_sig = card_sig.to_bytes_be();
+    println!("card sig: {}", hex::encode(&card_sig));
 
-    ensure!(icc_key.n().bits() == arqc_sig.len() * 8);
-    ensure!(*arqc_sig.last().unwrap() == 0xbc);
-    ensure!(arqc_sig[0] == 0x6a);
-    ensure!(arqc_sig[1] == 0x05);
+    ensure!(icc_key.n().bits() == card_sig.len() * 8);
+    ensure!(*card_sig.last().unwrap() == 0xbc);
+    ensure!(card_sig[0] == 0x6a);
+    ensure!(card_sig[1] == 0x05);
 
-    let arqc_sig_hash_contents = [
-        &arqc_sig[1..][..(arqc_sig.len() - 22)],
+    let card_sig_hash_contents = [
+        &card_sig[1..][..(card_sig.len() - 22)],
         &nonce.to_be_bytes(),
     ].concat();
 
-    println!("arqc_sig_hash_contents: {}", hex::encode(&arqc_sig_hash_contents));
+    println!("card_sig_hash_contents: {}", hex::encode(&card_sig_hash_contents));
 
-    let arqc_sig_hash: Vec<u8> = sha1::Sha1::digest(&arqc_sig_hash_contents).to_vec();
-    println!("arqc cert hash: {}", hex::encode(&arqc_sig_hash));
+    let card_sig_hash: Vec<u8> = sha1::Sha1::digest(&card_sig_hash_contents).to_vec();
+    println!("card sig hash: {}", hex::encode(&card_sig_hash));
 
-    let arqc_cert_hash_expected = &arqc_sig[(arqc_sig.len() - 21)..][0..20];
-    println!("expected: {}", hex::encode(arqc_cert_hash_expected));
+    let card_sig_hash_expected = &card_sig[(card_sig.len() - 21)..][0..20];
+    println!("expected: {}", hex::encode(card_sig_hash_expected));
 
-    ensure!(&arqc_sig_hash == arqc_cert_hash_expected);
+    ensure!(&card_sig_hash == card_sig_hash_expected);
 
     let out = CardThings {
         icc_pk_modulus: icc_pk_modulus.clone(),
         icc_pk_exponent: icc_pk_exponent.clone(),
-        arqc_sig_raw,
-        arqc_sig_hash_contents,
+        card_sig_raw,
+        card_sig_hash_contents,
     };
 
     println!("Reverifying...");
