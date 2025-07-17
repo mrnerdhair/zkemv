@@ -102,7 +102,10 @@ impl CardThings {
             // CDA
             0x05 => Ok(&self.card_sig_hash_contents[(self.card_sig_hash_contents.len() - 4)..]),
             // fDDA
-            0x95 => Ok(&self.card_sig_hash_contents[0x7a..=0x7d]),
+            0x95 => {
+                let offset = card_sig.len() - 22;
+                Ok(&self.card_sig_hash_contents[offset..(offset + 4)])
+            },
             _ => Err(()),
         }?;
 
