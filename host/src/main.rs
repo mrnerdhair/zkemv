@@ -286,6 +286,17 @@ fn parse_tag_list(buf: &[u8]) -> Result<Vec<(usize, usize)>> {
     Ok(list)
 }
 
+fn read_record(card: &pcsc::Card, sfi: u8, i: u8) -> Result<Tlv> {
+    println!("Reading file {}, record {}", sfi, i);
+    let tlv_buf = do_apdu(&card, apdu::Command::new(0, 0xb2, i, (sfi << 3) | 0b100))??;
+    println!("tlv_buf: {}", hex::encode(&tlv_buf));
+    let tlv = Tlv::from_vec(&tlv_buf)?;
+    ensure!(tlv.tag() == 0x70);
+    println!("{}", tlv.val());
+
+    Ok(tlv)
+}
+
 fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Result<u32>) -> Result<CardThings> {
     println!("Establishing PC/SC context...");
     let ctx = pcsc::Context::establish(pcsc::Scope::User)?;
@@ -424,11 +435,7 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
         ensure!(sfi & 0b111 == 0);
         let sfi = sfi >> 3;
         for i in srec..=erec {
-            println!("Reading file {}, record {}", sfi, i);
-            let tlv_buf = do_apdu(&card, apdu::Command::new(0, 0xb2, i, (sfi << 3) | 0b100))??;
-            let tlv = Tlv::from_vec(&tlv_buf)?;
-            ensure!(tlv.tag() == 0x70);
-            println!("{}", tlv.val());
+            let tlv = read_record(&card, sfi, i)?;
             let val = tlv.val().to_vec();
 
             if i - srec < dar {
