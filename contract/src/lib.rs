@@ -90,7 +90,6 @@ impl CardThings {
         if icc_key.n().bits() != card_sig.len() * 8 { return Err(()); }
         if *card_sig.last().unwrap() != 0xbc { return Err(()); }
         if card_sig[0] != 0x6a { return Err(()); }
-        if card_sig[1] != 0x05 { return Err(()); }
 
         let card_sig_hash: Vec<u8> = sha1::Sha1::digest(&self.card_sig_hash_contents).to_vec();
 
@@ -98,7 +97,16 @@ impl CardThings {
 
         if &card_sig_hash != card_sig_hash_expected { return Err(()); }
 
-        if u32::from_be_bytes(self.card_sig_hash_contents[(self.card_sig_hash_contents.len() - 4)..].try_into().unwrap()) != nonce { return Err(()); }
+        let card_sig_type = card_sig[1];
+        let card_sig_nonce = match card_sig_type {
+            // CDA
+            0x05 => Ok(&self.card_sig_hash_contents[(self.card_sig_hash_contents.len() - 4)..]),
+            // fDDA
+            0x95 => Ok(&self.card_sig_hash_contents[0x7a..=0x7d]),
+            _ => Err(()),
+        }?;
+
+        if u32::from_be_bytes(card_sig_nonce.try_into().unwrap()) != nonce { return Err(()); }
 
         Ok(())
     }

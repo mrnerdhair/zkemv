@@ -352,7 +352,7 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
 
     let pdol = parse_tag_list(&find_val_raw(&ats, "6F / A5 / 9F38")?.unwrap_or(vec![]))?;
 
-    let processing_options_payload = pdol.iter().flat_map(|&(tag, len)| {
+    let get_pdol_option = |&(tag, len)| {
         match tag {
             0x9f66 => { // Terminal Transaction Qualifiers
                 assert_eq!(len, 4);
@@ -394,7 +394,8 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
             },
             _ => vec![0u8; len],
         }
-    }).collect::<Vec<u8>>();
+    };
+    let processing_options_payload = pdol.iter().flat_map(get_pdol_option).collect::<Vec<u8>>();
 
     let processing_options = Tlv::from_vec(&do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xa8, 0, 0, &Tlv::new(0x83, Value::Val(processing_options_payload))?.to_vec()))??)?;
     println!("GET PROCESSING OPTIONS: {}", hex::encode_upper(&processing_options.to_vec()));
@@ -566,22 +567,32 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
 
     println!("Using nonce: 0x{}", hex::encode(nonce.to_be_bytes()));
 
-    let cdol1 = parse_tag_list(&find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?)?;
+    let card_sig_raw = match find_data_item(&data_items, "77 / 9f4b")? {
+        Some(fdda) => {
+            println!("fDDA: {}", hex::encode(&fdda));
+            fdda
+        },
+        None => {
+            let cdol1 = parse_tag_list(&find_data_item(&data_items, "8c")?.ok_or(anyhow!("CDOL1 not found"))?)?;
 
-    let tx_data = cdol1.iter().flat_map(|&(tag, len)| {
-        match tag {
-            0x9f37 => u32::to_be_bytes(nonce).to_vec(),
-            _ => vec![0u8; len],
-        }
-    }).collect::<Vec<u8>>();
+            let tx_data = cdol1.iter().flat_map(|&(tag, len)| {
+                match tag {
+                    0x9f37 => u32::to_be_bytes(nonce).to_vec(),
+                    _ => vec![0u8; len],
+                }
+            }).collect::<Vec<u8>>();
 
-    let arqc = do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xae, 0x90, 0, &tx_data))??;
+            let arqc = do_apdu(&card, apdu::Command::new_with_payload(0x80, 0xae, 0x90, 0, &tx_data))??;
 
-    println!("ARQC: {}", hex::encode(&arqc));
+            println!("ARQC: {}", hex::encode(&arqc));
 
-    let card_sig_raw = Tlv::from_vec(&arqc)?;
+            let arqc = Tlv::from_vec(&arqc)?;
 
-    println!("{}", card_sig_raw.to_string());
+            println!("{}", arqc.to_string());
+
+            find_val_raw(&arqc, "77 / 9f4b")?.ok_or(anyhow!("ARQC CDA sig missing"))?
+        },
+    };
 
     ensure!(icc_key.n().bits() == card_sig_raw.len() * 8);
     let card_sig: rsa::BigUint = rsa::hazmat::rsa_encrypt(&icc_key, &rsa::BigUint::from_bytes_be(&card_sig_raw))?;
@@ -591,11 +602,22 @@ fn do_card_things(reader_index: usize, nonce_getter: impl FnOnce([u8; 32]) -> Re
     ensure!(icc_key.n().bits() == card_sig.len() * 8);
     ensure!(*card_sig.last().unwrap() == 0xbc);
     ensure!(card_sig[0] == 0x6a);
-    ensure!(card_sig[1] == 0x05);
+    let card_sig_format = card_sig[1];
 
     let card_sig_hash_contents = [
         &card_sig[1..][..(card_sig.len() - 22)],
-        &nonce.to_be_bytes(),
+        &(match card_sig_format {
+            // CDA
+            0x05 => Ok(vec![nonce.to_be_bytes().to_vec()]),
+            // fDDA
+            0x95 => Ok(vec![
+                get_pdol_option(&(0x9f37, 4)),
+                get_pdol_option(&(0x9f02, 6)),
+                get_pdol_option(&(0x5f2a, 2)),
+                find_data_item(&data_items, "77 / 9f69")?.unwrap_or(vec![]),
+            ]),
+            _ => Err(anyhow!("unsupported signature format")),
+        })?.concat(),
     ].concat();
 
     println!("card_sig_hash_contents: {}", hex::encode(&card_sig_hash_contents));
